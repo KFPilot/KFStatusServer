@@ -20,6 +20,7 @@ class BotConfig:
     listen_port: int
     steam_api_key: str
     steam_api_url: str
+    update_cooldown: float
 
 @dataclass
 class SteamProfile:
@@ -60,6 +61,7 @@ bot_config = BotConfig(
     listen_port=int(raw_config['listen_port']),
     steam_api_key=raw_config['steam_api_key'],
     steam_api_url=raw_config['steam_api_url'],
+    update_cooldown=float(raw_config.get('update_cooldown', 0.1)),
 )
 
 intents = discord.Intents.default()
@@ -184,7 +186,15 @@ async def update_active_embeds(channel):
             await update_session_embed(info, session_id)
     await delete_stale_embeds()
 
-async def tcp_listener(channel):
+async def embed_update_loop(channel):
+    while True:
+        await asyncio.sleep(bot_config.update_cooldown)
+        try:
+            await update_active_embeds(channel)
+        except Exception as e:
+            print(f"Error updating embeds: {e}")
+
+async def tcp_listener():
     loop = asyncio.get_event_loop()
     try:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -200,12 +210,12 @@ async def tcp_listener(channel):
         try:
             conn, addr = await loop.sock_accept(server)
             print(f"Accepted connection from {addr}")
-            loop.create_task(handle_client(conn, channel))
+            loop.create_task(handle_client(conn))
         except Exception as e:
             print(f"Error accepting connection: {e}")
             await asyncio.sleep(2)  # Prevent tight loop on repeated errors
 
-async def handle_client(conn: socket.socket, channel):
+async def handle_client(conn: socket.socket):
     buffer = ""
     loop = asyncio.get_event_loop()
     while True:
@@ -229,7 +239,6 @@ async def handle_client(conn: socket.socket, channel):
                     old_info = session_payloads.get(sid)
                     if not old_info or info_changed(old_info, new_info):
                         session_payloads[sid] = new_info
-                        await update_active_embeds(channel)
                 except Exception as e:
                     print(f"Error parsing packet: {line} - {e}")
         except Exception as e:
@@ -241,6 +250,7 @@ async def handle_client(conn: socket.socket, channel):
 async def on_ready():
     print(f'Logged in as {client.user}')
     channel = client.get_channel(bot_config.channel_id)
-    await tcp_listener(channel)
+    asyncio.get_event_loop().create_task(embed_update_loop(channel))
+    await tcp_listener()
 
 client.run(bot_config.discord_token)
