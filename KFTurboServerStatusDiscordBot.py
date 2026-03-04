@@ -121,91 +121,68 @@ def parse_payload(data: dict) -> ServerPayload:
 def info_changed(old: ServerPayload, new: ServerPayload) -> bool:
     return old != new
 
+async def build_session_embed(info: ServerPayload, session_id: str) -> discord.Embed:
+    now = datetime.datetime.now()
+    embed = discord.Embed(
+        title=info.name or session_id,
+        color=0x7891ff
+    )
+    embed.set_author(
+        name="Killing Floor Turbo Session",
+        icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
+    )
+    game_type = info.game or "Unknown"
+    difficulty = info.difficulty or "Unknown"
+    map_name = info.map_name or info.map_file or "Unknown"
+    embed.add_field(
+        name="Game",
+        value=f"{game_type}\n{difficulty}\n{map_name}",
+        inline=False
+    )
+    if info.player_list:
+        profiles = await get_steam_profiles(info.player_list)
+        player_list_str = "\n".join([profiles[pid].persona_name for pid in info.player_list])
+    else:
+        player_list_str = "None"
+    embed.add_field(
+        name="Player List",
+        value=player_list_str,
+        inline=False
+    )
+    embed.set_footer(
+        text=f"Last updated {now.strftime('%d/%m/%Y %H:%M')}",
+        icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
+    )
+    return embed
+
+async def create_session_embed(channel, info: ServerPayload, session_id: str):
+    embed = await build_session_embed(info, session_id)
+    msg = await channel.send(embed=embed)
+    active_embeds[session_id] = ActiveEmbed(msg=msg, last_update=datetime.datetime.now())
+
+async def update_session_embed(info: ServerPayload, session_id: str):
+    embed = await build_session_embed(info, session_id)
+    await active_embeds[session_id].msg.edit(embed=embed)
+    active_embeds[session_id].last_update = datetime.datetime.now()
+
+async def delete_stale_embeds():
+    four_hours_ago = datetime.datetime.now() - datetime.timedelta(hours=4)
+    to_delete = [sid for sid, v in active_embeds.items() if v.last_update < four_hours_ago]
+    for sid in to_delete:
+        await active_embeds[sid].msg.delete()
+        del active_embeds[sid]
+
 async def update_active_embeds(channel):
-        global active_embeds
-        now = datetime.datetime.now()
-        # Create/update embeds for sessions
-        for sid, info in session_payloads.items():
-            session_id = info.session_id
-            match_state = info.match_state if info.match_state is not None else -1
-            if not session_id:
-                continue
-            # Creation: match_state != -1 and not already displayed
-            if match_state != -1 and session_id not in active_embeds:
-                embed = discord.Embed(
-                    title=info.name or session_id,
-                    color=0x7891ff
-                )
-                embed.set_author(
-                    name="Killing Floor Turbo Session",
-                    icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
-                )
-                game_type = info.game or "Unknown"
-                difficulty = info.difficulty or "Unknown"
-                map_name = info.map_name or info.map_file or "Unknown"
-                embed.add_field(
-                    name="Game",
-                    value=f"{game_type}\n{difficulty}\n{map_name}",
-                    inline=False
-                )
-                # Batch query SteamIDs for display names
-                if info.player_list:
-                    profiles = await get_steam_profiles(info.player_list)
-                    player_list_str = "\n".join([profiles[sid].persona_name for sid in info.player_list])
-                else:
-                    player_list_str = "None"
-                embed.add_field(
-                    name="Player List",
-                    value=player_list_str,
-                    inline=False
-                )
-                embed.set_footer(
-                    text=f"Last updated {now.strftime('%d/%m/%Y %H:%M')}",
-                    icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
-                )
-                msg = await channel.send(embed=embed)
-                active_embeds[session_id] = ActiveEmbed(msg=msg, last_update=now)
-            # Update: sid/session_id is in active_embeds
-            elif session_id in active_embeds:
-                embed = discord.Embed(
-                    title=info.name or session_id,
-                    color=0x7891ff
-                )
-                embed.set_author(
-                    name="Killing Floor Turbo Session",
-                    icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
-                )
-                game_type = info.game or "Unknown"
-                difficulty = info.difficulty or "Unknown"
-                map_name = info.map_name or info.map_file or "Unknown"
-                embed.add_field(
-                    name="Game",
-                    value=f"{game_type}\n{difficulty}\n{map_name}",
-                    inline=False
-                )
-                # Batch query SteamIDs for display names
-                if info.player_list:
-                    profiles = await get_steam_profiles(info.player_list)
-                    player_list_str = "\n".join([profiles[sid].persona_name for sid in info.player_list])
-                else:
-                    player_list_str = "None"
-                embed.add_field(
-                    name="Player List",
-                    value=player_list_str,
-                    inline=False
-                )
-                embed.set_footer(
-                    text=f"Last updated {now.strftime('%d/%m/%Y %H:%M')}",
-                    icon_url="https://cdn.discordapp.com/embed/avatars/0.png"
-                )
-                await active_embeds[session_id].msg.edit(embed=embed)
-                active_embeds[session_id].last_update = now
-        # Deletion: remove embeds older than 4 hours
-        four_hours_ago = now - datetime.timedelta(hours=4)
-        to_delete = [sid for sid, v in active_embeds.items() if v.last_update < four_hours_ago]
-        for sid in to_delete:
-            await active_embeds[sid].msg.delete()
-            del active_embeds[sid]
+    for sid, info in session_payloads.items():
+        session_id = info.session_id
+        match_state = info.match_state if info.match_state is not None else -1
+        if not session_id:
+            continue
+        if match_state != -1 and session_id not in active_embeds:
+            await create_session_embed(channel, info, session_id)
+        elif session_id in active_embeds:
+            await update_session_embed(info, session_id)
+    await delete_stale_embeds()
 
 async def tcp_listener(channel):
     loop = asyncio.get_event_loop()
