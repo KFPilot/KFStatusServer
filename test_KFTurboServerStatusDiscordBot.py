@@ -284,6 +284,137 @@ class TestActiveEmbed(unittest.TestCase):
         self.assertEqual(embed.last_update, new_time)
 
 
+class TestBuildSessionEmbed(unittest.TestCase):
+    def setUp(self):
+        bot.steam_profile_cache.clear()
+
+    def _make_info(self, **overrides):
+        base = dict(
+            name="Test Server", game="KFTurbo", difficulty="Hard",
+            map_file="KF-Farm", map_name="Farm", final_wave=10,
+            match_state=0, wave_state=1, player_count="1|6|0",
+            player_list=[], spectator_list=[], session_id="sess1",
+        )
+        base.update(overrides)
+        return bot.ServerPayload(**base)
+
+    def test_returns_embed(self):
+        info = self._make_info()
+        result = asyncio.get_event_loop().run_until_complete(bot.build_session_embed(info, "sess1"))
+        self.assertIsNotNone(result)
+
+    def test_uses_name_as_title(self):
+        info = self._make_info(name="My Server")
+        mock_discord.Embed.reset_mock()
+        asyncio.get_event_loop().run_until_complete(bot.build_session_embed(info, "sess1"))
+        mock_discord.Embed.assert_called_once()
+        call_kwargs = mock_discord.Embed.call_args[1]
+        self.assertEqual(call_kwargs['title'], "My Server")
+
+    def test_falls_back_to_session_id_when_no_name(self):
+        info = self._make_info(name=None)
+        mock_discord.Embed.reset_mock()
+        asyncio.get_event_loop().run_until_complete(bot.build_session_embed(info, "sess1"))
+        call_kwargs = mock_discord.Embed.call_args[1]
+        self.assertEqual(call_kwargs['title'], "sess1")
+
+    def test_falls_back_to_map_file_when_no_map_name(self):
+        info = self._make_info(map_name=None, map_file="KF-Offices")
+        mock_discord.Embed.reset_mock()
+        embed = asyncio.get_event_loop().run_until_complete(bot.build_session_embed(info, "sess1"))
+        # Check that add_field was called with map_file in the value
+        game_field_call = embed.add_field.call_args_list[0]
+        self.assertIn("KF-Offices", game_field_call[1]['value'])
+
+
+class TestCreateSessionEmbed(unittest.TestCase):
+    def setUp(self):
+        bot.active_embeds.clear()
+        bot.steam_profile_cache.clear()
+
+    def test_sends_embed_and_stores_active_embed(self):
+        info = bot.ServerPayload(
+            name="Test Server", game="KFTurbo", difficulty="Hard",
+            map_file="KF-Farm", map_name="Farm", final_wave=10,
+            match_state=0, wave_state=1, player_count="1|6|0",
+            session_id="sess1",
+        )
+        mock_msg = MagicMock()
+        channel = MagicMock()
+        channel.send = AsyncMock(return_value=mock_msg)
+
+        asyncio.get_event_loop().run_until_complete(bot.create_session_embed(channel, info, "sess1"))
+        channel.send.assert_called_once()
+        self.assertIn("sess1", bot.active_embeds)
+        self.assertIsInstance(bot.active_embeds["sess1"], bot.ActiveEmbed)
+        self.assertEqual(bot.active_embeds["sess1"].msg, mock_msg)
+
+
+class TestUpdateSessionEmbed(unittest.TestCase):
+    def setUp(self):
+        bot.active_embeds.clear()
+        bot.steam_profile_cache.clear()
+
+    def test_edits_existing_embed(self):
+        mock_msg = MagicMock()
+        mock_msg.edit = AsyncMock()
+        now = datetime.datetime.now()
+        bot.active_embeds["sess1"] = bot.ActiveEmbed(msg=mock_msg, last_update=now)
+
+        info = bot.ServerPayload(
+            name="Server", game="KFTurbo", difficulty="Hard",
+            map_file="KF-Farm", map_name="Farm", final_wave=10,
+            match_state=0, wave_state=2, player_count="1|6|0",
+            session_id="sess1",
+        )
+
+        asyncio.get_event_loop().run_until_complete(bot.update_session_embed(info, "sess1"))
+        mock_msg.edit.assert_called_once()
+        self.assertGreater(bot.active_embeds["sess1"].last_update, now)
+
+
+class TestDeleteStaleEmbeds(unittest.TestCase):
+    def setUp(self):
+        bot.active_embeds.clear()
+
+    def test_deletes_old_embeds(self):
+        mock_msg = MagicMock()
+        mock_msg.delete = AsyncMock()
+        stale_time = datetime.datetime.now() - datetime.timedelta(hours=5)
+        bot.active_embeds["old_sess"] = bot.ActiveEmbed(msg=mock_msg, last_update=stale_time)
+
+        asyncio.get_event_loop().run_until_complete(bot.delete_stale_embeds())
+        mock_msg.delete.assert_called_once()
+        self.assertNotIn("old_sess", bot.active_embeds)
+
+    def test_keeps_recent_embeds(self):
+        mock_msg = MagicMock()
+        recent_time = datetime.datetime.now() - datetime.timedelta(hours=1)
+        bot.active_embeds["recent_sess"] = bot.ActiveEmbed(msg=mock_msg, last_update=recent_time)
+
+        asyncio.get_event_loop().run_until_complete(bot.delete_stale_embeds())
+        self.assertIn("recent_sess", bot.active_embeds)
+
+    def test_deletes_multiple_stale_keeps_recent(self):
+        stale1 = MagicMock()
+        stale1.delete = AsyncMock()
+        stale2 = MagicMock()
+        stale2.delete = AsyncMock()
+        recent = MagicMock()
+
+        now = datetime.datetime.now()
+        bot.active_embeds["stale1"] = bot.ActiveEmbed(msg=stale1, last_update=now - datetime.timedelta(hours=5))
+        bot.active_embeds["stale2"] = bot.ActiveEmbed(msg=stale2, last_update=now - datetime.timedelta(hours=10))
+        bot.active_embeds["recent"] = bot.ActiveEmbed(msg=recent, last_update=now - datetime.timedelta(hours=1))
+
+        asyncio.get_event_loop().run_until_complete(bot.delete_stale_embeds())
+        stale1.delete.assert_called_once()
+        stale2.delete.assert_called_once()
+        self.assertNotIn("stale1", bot.active_embeds)
+        self.assertNotIn("stale2", bot.active_embeds)
+        self.assertIn("recent", bot.active_embeds)
+
+
 class TestUpdateActiveEmbeds(unittest.TestCase):
     def setUp(self):
         bot.session_payloads.clear()
@@ -356,15 +487,6 @@ class TestUpdateActiveEmbeds(unittest.TestCase):
         asyncio.get_event_loop().run_until_complete(bot.update_active_embeds(channel))
         mock_msg.delete.assert_called_once()
         self.assertNotIn("old_sess", bot.active_embeds)
-
-    def test_keeps_recent_embeds(self):
-        mock_msg = MagicMock()
-        recent_time = datetime.datetime.now() - datetime.timedelta(hours=1)
-        bot.active_embeds["recent_sess"] = bot.ActiveEmbed(msg=mock_msg, last_update=recent_time)
-
-        channel = MagicMock()
-        asyncio.get_event_loop().run_until_complete(bot.update_active_embeds(channel))
-        self.assertIn("recent_sess", bot.active_embeds)
 
 
 if __name__ == '__main__':
