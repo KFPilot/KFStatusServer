@@ -26,6 +26,11 @@ class BotConfig:
 class SteamProfile:
     steam_id: str
     persona_name: str
+    
+@dataclass
+class PlayerEntry:
+    steam_id: str
+    perk : str
 
 @dataclass
 class ServerPayload:
@@ -40,7 +45,7 @@ class ServerPayload:
     player_count: Optional[int]
     player_max: Optional[int]
     spectator_count: Optional[int]
-    player_list: list[str] = field(default_factory=list)
+    player_list: list[PlayerEntry] = field(default_factory=list)
     spectator_list: list[str] = field(default_factory=list)
     session_id: Optional[str] = None
 
@@ -75,11 +80,12 @@ active_embeds: dict[str, ActiveEmbed] = {}
 
 steam_profile_cache: dict[str, SteamProfile] = {}
 
-async def get_steam_profiles(steam_ids: list[str], retry_count: int = 1, retry_delay: int = 15) -> dict[str, SteamProfile]:
+async def get_steam_profiles(players: list[PlayerEntry], retry_count: int = 1, retry_delay: int = 15) -> dict[str, SteamProfile]:
+    steam_ids = [player.steam_id for player in players]
     # Only fetch uncached IDs
-    ids_to_fetch = [sid for sid in steam_ids if sid not in steam_profile_cache]
+    ids_to_fetch = [player_id for player_id in steam_ids if player_id not in steam_profile_cache]
     if not ids_to_fetch:
-        return {sid: steam_profile_cache[sid] for sid in steam_ids}
+        return {player_id: steam_profile_cache[player_id] for player_id in steam_ids}
     params = {
         "key": bot_config.steam_api_key,
         "steamids": ",".join(ids_to_fetch)
@@ -91,9 +97,9 @@ async def get_steam_profiles(steam_ids: list[str], retry_count: int = 1, retry_d
                 if response.status == 200:
                     data = await response.json()
                     for player in data['response']['players']:
-                        sid = player['steamid']
+                        player_id = player['steamid']
                         name = player.get('personaname', 'Unknown User')
-                        steam_profile_cache[sid] = SteamProfile(steam_id=sid, persona_name=name)
+                        steam_profile_cache[player_id] = SteamProfile(steam_id=player_id, persona_name=name)
                     break
                 elif response.status == 429 and attempt < retry_count:
                     print(f"Rate limited. Waiting {retry_delay} seconds and retrying... (Attempt {attempt+1}/{retry_count})")
@@ -105,17 +111,23 @@ async def get_steam_profiles(steam_ids: list[str], retry_count: int = 1, retry_d
                 print(f"Error fetching profiles: {e}")
                 break
     # Return profiles for all requested IDs (from cache, fallback to unknown)
-    return {sid: steam_profile_cache.get(sid, SteamProfile(steam_id=sid, persona_name=sid)) for sid in steam_ids}
+    return {player_id: steam_profile_cache.get(player_id, SteamProfile(steam_id=player_id, persona_name=player_id)) for player_id in steam_ids}
 
 def parse_payload(data: dict) -> ServerPayload:
-    PlayerCount = data.get('pc').split('|')
+    PlayerCount = data.get('pc', '0|0|0').split('|')
 
     #Once game ends, just cleanup player data.
+    PlayerList = []
     if data.get('ms') > 0:
         PlayerCount[0] = 0
         PlayerCount[2] = 0
-        data['pl'] = []
+        PlayerList = []
         data['sl'] = []
+    else:
+        PlayerDataList = data.get('pl', [])
+        for Player in PlayerDataList:
+            PlayerData = Player.split('|')
+            PlayerList.append(PlayerEntry(steam_id=PlayerData[0], perk=PlayerData[1]))
 
     return ServerPayload(
         name=data.get('serv'),
@@ -129,7 +141,7 @@ def parse_payload(data: dict) -> ServerPayload:
         player_count=int(PlayerCount[0]),
         player_max=int(PlayerCount[1]),
         spectator_count=int(PlayerCount[2]),
-        player_list=data.get('pl', []),
+        player_list=PlayerList,
         spectator_list=data.get('sl', []),
         session_id=data.get('sid'),
     )
@@ -143,6 +155,8 @@ def get_map_name(Payload:ServerPayload)-> str:
     return Payload.map_name
 
 def get_game_type_name(Payload:ServerPayload)-> str:
+    if not Payload.game:
+        return "Unknown"
     match Payload.game.lower():
         case "turbo":
             return "Turbo"
@@ -154,6 +168,8 @@ def get_game_type_name(Payload:ServerPayload)-> str:
             return "Randomizer"
         case "turboholdoutgame":
             return "Holdout"
+        case "turbotest":
+            return "Test Map"
     return "Unknown"
 
 def get_game_difficulty_name(Payload:ServerPayload)-> str:
@@ -181,8 +197,21 @@ def get_match_state_name(Payload:ServerPayload)-> str:
         case 2:
             return "Win"
         case 3:
+            if Payload.game and Payload.game.lower() == "turbotest":
+                return "Empty"
             return "Abort"
+        
     return "Unknown"
+
+def get_wave_text(Payload:ServerPayload)-> str:
+    if Payload.wave_state is None:
+        return ""
+    wave_number = abs(Payload.wave_state)
+    if wave_number == 0:
+        return ""
+    if Payload.final_wave is not None and Payload.final_wave > 0:
+        return f"{wave_number} / {Payload.final_wave}"
+    return f"{wave_number}"
 
 def get_flag_icon(Payload:ServerPayload) -> str:
     if not Payload.name:
@@ -211,8 +240,31 @@ def get_flag_icon(Payload:ServerPayload) -> str:
             return "https://raw.githubusercontent.com/KFPilot/KFTurboStatusServer/refs/heads/main/img/flag-poland.png"
         case _:
             return "https://cdn.discordapp.com/embed/avatars/0.png"
+        
+        
+def get_player_text(PlayerName:str, perk:str)-> str:
+    return f"{get_perk_icon(perk)} {PlayerName}"
 
-async def build_session_embed(info: ServerPayload, session_id: str, from_update: bool) -> discord.Embed:
+def get_perk_icon(perk:str)-> str:
+    match (perk.lower()):
+        case "med":
+            return "<:PerkMedic:1478637214148595894>"
+        case "sup":
+            return "<:PerkSupport:1478637310068260988>"
+        case "sha":
+            return "<:PerkSharpshooter:1478637191046496438>"
+        case "com":
+            return "<:PerkCommando:1478637293240848456>"
+        case "ber":
+            return "<:PerkBerserker:1478637275066798201>"
+        case "fir":
+            return "<:PerkFirebug:1478637233287331951>"
+        case "dem":
+            return "<:PerkDemolitions:1478637253571121173>"
+    return "<:PerkSharpshooter:1478637191046496438>"
+            
+
+async def build_session_embed(info: ServerPayload, session_id: str) -> discord.Embed:
     now = datetime.datetime.now()
 
     embed = discord.Embed(
@@ -231,9 +283,20 @@ async def build_session_embed(info: ServerPayload, session_id: str, from_update:
     map_name = get_map_name(info)
     state = get_match_state_name(info)
     difficulty = get_game_difficulty_name(info)
-    wave = abs(info.wave_state)
-    final_wave = info.final_wave if info.final_wave > 0 else 0
+
+    wave = get_wave_text(info)
+
+    #Optional fields should evaluate their entry fully.
+    if not wave or game_type == "Test Map":
+        wave = ("\u200b", "\u200b")
+    else:
+        wave = ("Wave", wave)
+
     spectator_count = info.spectator_count if info.spectator_count is not None else 0
+    if spectator_count == 0:
+        spectator_count = ("\u200b", "\u200b")
+    else:
+        spectator_count = ("Spectators", str(spectator_count))
 
     # Grid: left to right, top to bottom
     # Discord automatically wraps after 3 fields if inline, so we can just add them in order
@@ -242,23 +305,59 @@ async def build_session_embed(info: ServerPayload, session_id: str, from_update:
         ("Map", map_name),
         ("State", state),
         ("Difficulty", difficulty),
-        ("Wave", f"{wave}/{final_wave}"),
-        ("Spectators", str(spectator_count)),
+        wave,
+        spectator_count,
     ]
+
     for name, value in grid_fields:
         embed.add_field(name=name, value=value, inline=True)
 
     # Player list
-    if info.match_state == 0:
-        if info.player_list:
-            profiles = await get_steam_profiles(info.player_list)
-            player_list_str = "\n".join([profiles[pid].persona_name for pid in info.player_list])
-        else:
-            player_list_str = "None"
+    if info.match_state == 0 and info.player_list:
+        Col = 0
+        Row = 0
+
+        PlayerLists : list[list[PlayerEntry]] = list()
+        PlayerLists.append([])
+        PlayerLists.append([])
+        PlayerLists.append([])
+        for player in info.player_list:
+            PlayerLists[Col].append(player)
+            Col = Col + 1
+            if (Col >= 3):
+                Row = Row + 1
+                Col = 0
+
+        profiles = await get_steam_profiles(info.player_list)
+        
+        player_list_str = "\u200b"
+        if len(PlayerLists[0]) != 0: 
+            player_list_str = "\n".join([get_player_text(profiles[player.steam_id].persona_name, player.perk) for player in PlayerLists[0]])
+        
         embed.add_field(
-            name=f"Player List {info.player_count}/{info.player_max}",
+            name=f"Player List {info.player_count} / {info.player_max}",
             value=player_list_str,
-            inline=False
+            inline=True
+        )
+
+        player_list_str = "\u200b"
+        if len(PlayerLists[1]) != 0: 
+            player_list_str = "\n".join([get_player_text(profiles[player.steam_id].persona_name, player.perk) for player in PlayerLists[1]])
+
+        embed.add_field(
+            name="\u200b",
+            value=player_list_str,
+            inline=True
+        )
+
+        player_list_str = "\u200b"
+        if len(PlayerLists[2]) != 0: 
+            player_list_str = "\n".join([get_player_text(profiles[player.steam_id].persona_name, player.perk) for player in PlayerLists[2]])
+        
+        embed.add_field(
+            name="\u200b",
+            value=player_list_str,
+            inline=True
         )
 
     embed.set_footer(
@@ -269,20 +368,19 @@ async def build_session_embed(info: ServerPayload, session_id: str, from_update:
 
 async def create_session_embed(channel, info: ServerPayload, session_id: str):
     global active_embeds
-    embed = await build_session_embed(info, session_id, False)
+    embed = await build_session_embed(info, session_id)
     msg = await channel.send(embed=embed)
     active_embeds[session_id] = ActiveEmbed(msg=msg, last_update=datetime.datetime.now(), last_payload=info)
 
 async def update_session_embed(info: ServerPayload, session_id: str):
     global active_embeds
-    embed = await build_session_embed(info, session_id, True)
+    embed = await build_session_embed(info, session_id)
     try:
         await active_embeds[session_id].msg.edit(embed=embed)
     except:
         print("Failed to edit message.")
 
-    if info.match_state != -1:
-        active_embeds[session_id].last_payload = info
+    active_embeds[session_id].last_payload = info
 
 async def delete_stale_embeds():
     global active_embeds
@@ -302,15 +400,22 @@ async def update_active_embeds(channel):
     session_keys = list(new_session_payloads.keys())
     for sid in session_keys:
         info = new_session_payloads[sid]
+        
+        if not info.match_state or not session_id:
+            continue
+
+        match_state = info.match_state
         session_id = info.session_id
-        match_state = info.match_state if info.match_state is not None else -1
+
         if not session_id:
             continue
+
         if match_state == -1:
             continue
-        if session_id not in active_embeds:
+
+        if session_id not in active_embeds and not match_state == 3:
             await create_session_embed(channel, info, session_id)
-        elif session_id in active_embeds:
+        else:
             await update_session_embed(info, session_id)
     await delete_stale_embeds()
 
@@ -344,7 +449,7 @@ async def tcp_listener():
 def receive_payload(new_payload: ServerPayload):
     global session_payloads
     new_session_id = new_payload.session_id
-    if (new_session_id in active_embeds) and (not new_session_id in session_payloads):
+    if (new_session_id in active_embeds) and (new_session_id not in session_payloads):
         if not info_changed(active_embeds[new_session_id].last_payload, new_payload):
             return
     
@@ -392,12 +497,23 @@ async def handle_client(conn: socket.socket):
             print(f"Error receiving data: {e}")
             break
     print(f"Closing connection.")
+
+    if last_known_session_id and last_known_session_id in active_embeds:
+        if active_embeds[last_known_session_id].last_payload.match_state == 0:
+            ending_payload = active_embeds[last_known_session_id].last_payload
+            ending_payload.match_state = 3
+            receive_payload(ending_payload)
+
+
     conn.close()
 
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
     channel = client.get_channel(bot_config.channel_id)
+    if channel is None:
+        print(f"Error: Could not find channel {bot_config.channel_id}.")
+        return
     asyncio.get_event_loop().create_task(embed_update_loop(channel))
     await tcp_listener()
 
