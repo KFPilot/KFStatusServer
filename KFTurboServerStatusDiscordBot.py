@@ -15,6 +15,7 @@ from typing import Optional
 
 @dataclass
 class BotConfig:
+    localhost: str
     discord_token: str
     channel_id: int
     listen_port: int
@@ -64,6 +65,7 @@ except Exception as e:
     sys.exit(1)
 
 bot_config = BotConfig(
+    localhost=raw_config['localhost'],
     discord_token=raw_config['discord_token'],
     channel_id=int(raw_config['channel_id']),
     listen_port=int(raw_config['listen_port']),
@@ -422,10 +424,10 @@ async def tcp_listener():
     try:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("127.0.0.1", bot_config.listen_port))
+        server.bind((bot_config.localhost, bot_config.listen_port))
         server.listen(10)
         server.setblocking(False)
-        print(f"Listening for TurboInfo packets on 127.0.0.1:{bot_config.listen_port}...")
+        print(f"Listening for TurboInfo packets on {bot_config.localhost}:{bot_config.listen_port}...")
     except Exception as e:
         print(f"Error starting TCP listener: {e}")
         return
